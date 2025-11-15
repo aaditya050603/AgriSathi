@@ -2,6 +2,7 @@ requests
 langchain
 langchainhub
 langchain-tavily
+langchain.agents 
 langgraph
 langchain-google-genai
 fuzzywuzzy
