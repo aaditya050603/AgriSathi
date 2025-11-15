@@ -15,24 +15,21 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")       # Gemini Key (optional)
 
 # Validate DATA_GOV_API_KEY
 if not DATA_GOV_API_KEY:
-    raise RuntimeError("❌ Missing api_mandi (DATA_GOV_API_KEY). Add it to environment.")
+    raise RuntimeError("❌ Missing api_mandi (DATA_GOV_API_KEY). Add to environment.")
 
 USE_AGENT = bool(GOOGLE_API_KEY)
 
 BASE_URL = "https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d0070"
 
 
-# ----------------------- TOOL FUNCTION ---------------------------------
+# ---------------------------------------------------------------------
+# TOOL FUNCTION: Calls Government API for mandi crop prices
+# ---------------------------------------------------------------------
 @tool
 def market_price(query: str) -> str:
-    """
-    Calls data.gov.in government API to fetch mandi crop prices.
-    Expected input format: 'price of tomato in maharashtra'
-    Returns JSON with crop, state, and records list.
-    """
     query = query.lower()
     if " in " not in query:
-        return json.dumps({"error": "Use format: price of [commodity] in [state]"})
+        return json.dumps({"error": "Format must be: price of [commodity] in [state]"})
 
     parts = query.split(" in ")
     commodity = parts[0].replace("price of ", "").strip()
@@ -50,20 +47,19 @@ def market_price(query: str) -> str:
         response = requests.get(BASE_URL, params=params)
         response.raise_for_status()
         data = response.json()
-
         return json.dumps({
             "crop": commodity,
             "state": state,
             "records": data.get("records", [])
         })
 
-    except requests.exceptions.RequestException as e:
-        return json.dumps({"error": f"API Request Failed: {e}"})
     except Exception as e:
-        return json.dumps({"error": f"Unexpected Error: {e}"})
+        return json.dumps({"error": f"API Error: {e}"})
 
 
-# ----------------------- AGENT SETUP ---------------------------------
+# ---------------------------------------------------------------------
+# GEMINI AGENT SETUP (Hybrid - Optional)
+# ---------------------------------------------------------------------
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain.prompts import PromptTemplate
@@ -81,11 +77,11 @@ if USE_AGENT:
         prompt = PromptTemplate(
             input_variables=["input"],
             template="""
-You are an AI assistant helping farmers with mandi crop prices.
+You are an AI assistant providing agricultural mandi price information.
 Use the tool `market_price` when needed.
-Keep responses short & factual.
+Keep responses short, accurate and helpful.
 
-User Query:
+User question:
 {input}
 """
         )
@@ -101,14 +97,16 @@ User Query:
             verbose=True
         )
 
-        print("🌟 Gemini Agent Enabled")
+        print("🌟 Gemini AI Agent Enabled")
 
     except Exception as e:
-        print(f"⚠ Agent startup failed: {e}")
+        print(f"⚠ Agent startup failed. Running tool-only mode. Error: {e}")
         agent_executor = None
 
 
-# ----------------------- FLASK SERVER ---------------------------------
+# ---------------------------------------------------------------------
+# FLASK APP ROUTES
+# ---------------------------------------------------------------------
 app = Flask(__name__)
 
 @app.route("/")
@@ -127,12 +125,12 @@ def query():
     try:
         # Natural language AI mode
         if agent_executor and question:
-            resp = agent_executor.invoke({"input": question})
-            return jsonify({"type": "agent", "response": resp})
+            response = agent_executor.invoke({"input": question})
+            return jsonify({"type": "agent", "response": response})
 
-        # Direct tool mode
+        # Direct tool method
         if not commodity or not state:
-            return jsonify({"error": "Commodity & State required"}), 400
+            return jsonify({"error": "Commodity & State are required"}), 400
 
         user_input = f"price of {commodity} in {state}"
         output_text = market_price.invoke(user_input)
@@ -143,7 +141,7 @@ def query():
 
         records = data.get("records", [])
 
-        # Fuzzy market filter
+        # Filter by market name if provided
         if market:
             market_names = [rec.get("market", "") for rec in records]
             best_match, _ = process.extractOne(market, market_names)
@@ -152,12 +150,34 @@ def query():
         if not records:
             return jsonify({"error": "No records found"}), 404
 
-        formatted = [{
-            "Market": rec.get("market", ""),
-            "Min Price (₹)": rec.get("min_price", ""),
-            "Max Price (₹)": rec.get("max_price", ""),
-            "Modal Price (₹)": rec.get("modal_price", ""),
-            "Date": rec.get("arrival_date", ""),
-            "Commodity": rec.get("commodity", ""),
-            "State": rec.get("state", "")
-        } for rec in records]
+        formatted = [
+            {
+                "Market": rec.get("market", ""),
+                "Min Price (₹)": rec.get("min_price", ""),
+                "Max Price (₹)": rec.get("max_price", ""),
+                "Modal Price (₹)": rec.get("modal_price", ""),
+                "Date": rec.get("arrival_date", ""),
+                "Commodity": rec.get("commodity", ""),
+                "State": rec.get("state", "")
+            }
+            for rec in records
+        ]
+
+        return jsonify({
+            "type": "table",
+            "data": {
+                "crop": data.get("crop", ""),
+                "state": data.get("state", ""),
+                "records": formatted
+            }
+        })
+
+    except Exception as e:
+        return jsonify({"error": f"Server Error: {e}"})
+
+
+# ---------------------------------------------------------------------
+# FLASK BOOT
+# ---------------------------------------------------------------------
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000, debug=True)
