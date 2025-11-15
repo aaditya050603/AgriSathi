@@ -13,9 +13,9 @@ dotenv.load_dotenv()
 DATA_GOV_API_KEY = os.getenv("api_mandi")          # Agmarknet API Key
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")       # Gemini Key (optional)
 
-# Require DATA_GOV_API_KEY always
+# Validate DATA_GOV_API_KEY
 if not DATA_GOV_API_KEY:
-    raise RuntimeError("❌ Missing api_mandi (DATA_GOV_API_KEY). Please add it to environment.")
+    raise RuntimeError("❌ Missing api_mandi (DATA_GOV_API_KEY). Add it to environment.")
 
 USE_AGENT = bool(GOOGLE_API_KEY)
 
@@ -26,13 +26,13 @@ BASE_URL = "https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d007
 @tool
 def market_price(query: str) -> str:
     """
-    Fetches agricultural market prices from the data.gov.in API.
-    The query format must be: 'price of tomato in maharashtra'
-    Returns structured JSON.
+    Calls data.gov.in government API to fetch mandi crop prices.
+    Expected input format: 'price of tomato in maharashtra'
+    Returns JSON with crop, state, and records list.
     """
     query = query.lower()
     if " in " not in query:
-        return json.dumps({"error": "Format error. Use 'price of [commodity] in [state]'"})
+        return json.dumps({"error": "Use format: price of [commodity] in [state]"})
 
     parts = query.split(" in ")
     commodity = parts[0].replace("price of ", "").strip()
@@ -58,14 +58,14 @@ def market_price(query: str) -> str:
         })
 
     except requests.exceptions.RequestException as e:
-        return json.dumps({"error": f"API request failed: {e}"})
+        return json.dumps({"error": f"API Request Failed: {e}"})
     except Exception as e:
-        return json.dumps({"error": f"Unexpected error: {e}"})
+        return json.dumps({"error": f"Unexpected Error: {e}"})
 
 
 # ----------------------- AGENT SETUP ---------------------------------
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.agents import create_react_agent, AgentExecutor
+from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain.prompts import PromptTemplate
 
 agent_executor = None
@@ -78,43 +78,38 @@ if USE_AGENT:
             temperature=0
         )
 
-        react_prompt = PromptTemplate(
-            input_variables=["input", "agent_scratchpad"],
+        prompt = PromptTemplate(
+            input_variables=["input"],
             template="""
-You are an agriculture mandi market price assistant.
-Use the tool 'market_price' when needed to fetch live mandi pricing from the Indian Government dataset.
-Provide short, clear answers formatted for farmers.
+You are an AI assistant helping farmers with mandi crop prices.
+Use the tool `market_price` when needed.
+Keep responses short & factual.
 
-If the tool returns nothing, say "Unable to find data for this crop or location."
-
-{agent_scratchpad}
-User question: {input}
+User Query:
+{input}
 """
         )
 
-        agent = create_react_agent(
+        agent = create_tool_calling_agent(
             llm=llm,
-            tools=[market_price],
-            prompt=react_prompt
+            tools=[market_price]
         )
 
         agent_executor = AgentExecutor(
             agent=agent,
             tools=[market_price],
-            verbose=True,
-            handle_parsing_errors=True
+            verbose=True
         )
 
-        print("🌟 Gemini Agent Enabled (Hybrid mode active)")
+        print("🌟 Gemini Agent Enabled")
 
     except Exception as e:
-        print(f"⚠ Agent startup failed, running tool-only mode: {e}")
+        print(f"⚠ Agent startup failed: {e}")
         agent_executor = None
 
 
 # ----------------------- FLASK SERVER ---------------------------------
 app = Flask(__name__)
-
 
 @app.route("/")
 def index():
@@ -127,18 +122,17 @@ def query():
     commodity = data.get("commodity")
     state = data.get("state")
     market = data.get("market")
-    question = data.get("question")  # support natural language
+    question = data.get("question")
 
     try:
-        # If natural language agent available and question given → use agent
+        # Natural language AI mode
         if agent_executor and question:
-            print("🤖 Using AI agent for natural query")
-            response = agent_executor.invoke({"input": question})
-            return jsonify({"type": "agent", "response": response})
+            resp = agent_executor.invoke({"input": question})
+            return jsonify({"type": "agent", "response": resp})
 
-        # otherwise use tool directly
+        # Direct tool mode
         if not commodity or not state:
-            return jsonify({"error": "Commodity & State are required"}), 400
+            return jsonify({"error": "Commodity & State required"}), 400
 
         user_input = f"price of {commodity} in {state}"
         output_text = market_price.invoke(user_input)
@@ -149,7 +143,7 @@ def query():
 
         records = data.get("records", [])
 
-        # Market filtering
+        # Fuzzy market filter
         if market:
             market_names = [rec.get("market", "") for rec in records]
             best_match, _ = process.extractOne(market, market_names)
@@ -158,7 +152,7 @@ def query():
         if not records:
             return jsonify({"error": "No records found"}), 404
 
-        formatted_records = [{
+        formatted = [{
             "Market": rec.get("market", ""),
             "Min Price (₹)": rec.get("min_price", ""),
             "Max Price (₹)": rec.get("max_price", ""),
@@ -167,19 +161,3 @@ def query():
             "Commodity": rec.get("commodity", ""),
             "State": rec.get("state", "")
         } for rec in records]
-
-        return jsonify({
-            "type": "table",
-            "data": {
-                "crop": data.get("crop", ""),
-                "state": data.get("state", ""),
-                "records": formatted_records
-            }
-        })
-
-    except Exception as e:
-        return jsonify({"error": f"Unexpected error: {e}"})
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000, debug=True)
